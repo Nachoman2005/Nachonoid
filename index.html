@@ -100,34 +100,62 @@
             box-shadow: 0 0 20px var(--primary);
         }
 
-        /* ─── Mobile Controls ──────────────────────────────────── */
+        /* ─── Mobile drag strip ────────────────────────────────── */
+        /*
+         * En mobile reemplazamos los botones izquierda/derecha
+         * por una zona de arrastre libre. El paddle sigue la
+         * posición X del dedo en toda la pantalla (canvas + strip).
+         */
         #mobile-ui {
-            flex: 0 0 auto;          /* nunca crece ni shrinkea */
-            height: 100px;
-            display: flex;
+            flex: 0 0 auto;
+            height: 72px;
             width: 100%;
             background: #07070f;
             border-top: 1px solid #1a1a2e;
-        }
-
-        .touch-zone {
-            flex: 1;
             display: flex;
             justify-content: center;
             align-items: center;
-            font-size: 2.2rem;
-            color: rgba(255,255,255,0.15);
-            transition: background 0.1s, color 0.1s;
-            /* touch-action: none heredado de * */
-            cursor: pointer;
+            position: relative;
+            overflow: hidden;
         }
-        .touch-zone.active {
-            background: rgba(0,229,255,0.08);
-            color: var(--primary);
-        }
-        #left-zone  { border-right: 1px solid #1a1a2e; }
 
-        /* En desktop ocultamos el panel y lo dejamos sin altura */
+        /* Pista visual que indica "arrastrá aquí" */
+        #drag-track {
+            width: 80%;
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(255,255,255,0.06);
+            position: relative;
+        }
+        /* Indicator dot que sigue al dedo */
+        #drag-indicator {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 28px; height: 28px;
+            border-radius: 50%;
+            background: var(--primary);
+            box-shadow: 0 0 12px var(--primary);
+            opacity: 0.5;
+            transition: left 0.05s linear, opacity 0.2s;
+            pointer-events: none;
+        }
+        #drag-indicator.touching {
+            opacity: 1;
+            width: 32px; height: 32px;
+        }
+        #drag-label {
+            position: absolute;
+            bottom: 8px;
+            font-size: 0.6rem;
+            letter-spacing: 3px;
+            color: rgba(255,255,255,0.18);
+            text-transform: uppercase;
+            pointer-events: none;
+        }
+
+        /* En desktop ocultamos el panel */
         @media (min-width: 1024px) {
             #mobile-ui { display: none; height: 0; }
         }
@@ -157,10 +185,12 @@
     </div>
 </div>
 
-<!-- Mobile UI siempre presente en el DOM, CSS lo oculta en desktop -->
+<!-- Mobile UI: zona de arrastre libre (solo visible en mobile) -->
 <div id="mobile-ui">
-    <div class="touch-zone" id="left-zone">◀</div>
-    <div class="touch-zone" id="right-zone">▶</div>
+    <div id="drag-track">
+        <div id="drag-indicator"></div>
+    </div>
+    <span id="drag-label">deslizá para mover</span>
 </div>
 
 <script>
@@ -591,7 +621,7 @@ const Game = {
         document.getElementById('restart-lose-btn').onclick = startGame;
         document.getElementById('restart-win-btn').onclick  = startGame;
 
-        // Keyboard
+        // ── Keyboard (desktop) ─────────────────────────────────────────────
         window.addEventListener('keydown', e => {
             if (e.key === 'ArrowLeft')  this.keys.left  = true;
             if (e.key === 'ArrowRight') this.keys.right = true;
@@ -601,50 +631,64 @@ const Game = {
             if (e.key === 'ArrowRight') this.keys.right = false;
         });
 
-        // ── Touch controls ─────────────────────────────────────────────────
-        // Se usa pointer events: funcionan de forma unificada en iOS/Android.
-        // El truco clave: setPointerCapture para no perder el touch si el dedo
-        // se desplaza ligeramente fuera del botón.
+        // ── Touch drag (mobile) ────────────────────────────────────────────
+        //
+        // Estrategia: escuchamos pointer events sobre TODA la pantalla
+        // (document), así el dedo puede comenzar en cualquier lugar
+        // (canvas, strip inferior, bordes) y el paddle lo sigue.
+        //
+        // setPointerCapture garantiza que aunque el dedo se mueva
+        // fuera del elemento que capturó el evento, seguimos recibiendo
+        // pointermove — clave para no perder el arrastre.
 
-        const setupZone = (id, side) => {
-            const el = document.getElementById(id);
+        const indicator = document.getElementById('drag-indicator');
+        const track     = document.getElementById('drag-track');
 
-            el.addEventListener('pointerdown', e => {
-                e.preventDefault();
-                el.setPointerCapture(e.pointerId);
-                el.classList.add('active');
-                this.keys[side] = true;
-                this.initAudio();
-            });
+        // Mapea clientX → posición X del paddle en coordenadas base
+        const movePaddleToX = (clientX) => {
+            const rect = this.canvas.getBoundingClientRect();
+            // Si el dedo está sobre el canvas usamos su rect;
+            // si está en la strip inferior extrapolamos igual con el mismo scale.
+            const relX = (clientX - rect.left) / this.scale;
+            this.paddle.x = Math.max(0, Math.min(this.baseW - this.paddle.w, relX - this.paddle.w / 2));
 
-            el.addEventListener('pointerup', e => {
-                e.preventDefault();
-                el.classList.remove('active');
-                this.keys[side] = false;
-            });
-
-            el.addEventListener('pointercancel', () => {
-                el.classList.remove('active');
-                this.keys[side] = false;
-            });
+            // Mover el indicator dot en la track
+            if (indicator && track) {
+                const trackRect  = track.getBoundingClientRect();
+                const pct        = Math.max(0, Math.min(1, (clientX - trackRect.left) / trackRect.width));
+                indicator.style.left = `${pct * 100}%`;
+            }
         };
 
-        setupZone('left-zone',  'left');
-        setupZone('right-zone', 'right');
+        // Solo activamos drag en dispositivos touch (no en desktop con ratón)
+        let activeTouchId = null;
 
-        // Canvas touch → también mueve paddle (arrastrar dedo por canvas)
-        this.canvas.addEventListener('touchstart', e => {
+        document.addEventListener('pointerdown', e => {
+            if (e.pointerType === 'mouse') return; // solo touch/stylus
+            if (activeTouchId !== null) return;     // ya hay un dedo activo
             e.preventDefault();
+            activeTouchId = e.pointerId;
+            // Capturamos en document para recibir todos los eventos siguientes
+            document.setPointerCapture?.(e.pointerId);
             this.initAudio();
+            if (indicator) indicator.classList.add('touching');
+            movePaddleToX(e.clientX);
         }, { passive: false });
 
-        this.canvas.addEventListener('touchmove', e => {
+        document.addEventListener('pointermove', e => {
+            if (e.pointerType === 'mouse') return;
+            if (e.pointerId !== activeTouchId) return;
             e.preventDefault();
-            const t = e.touches[0];
-            const rect = this.canvas.getBoundingClientRect();
-            const relX = (t.clientX - rect.left) / this.scale;
-            this.paddle.x = Math.max(0, Math.min(this.baseW - this.paddle.w, relX - this.paddle.w / 2));
+            movePaddleToX(e.clientX);
         }, { passive: false });
+
+        const endTouch = (e) => {
+            if (e.pointerId !== activeTouchId) return;
+            activeTouchId = null;
+            if (indicator) indicator.classList.remove('touching');
+        };
+        document.addEventListener('pointerup',     endTouch);
+        document.addEventListener('pointercancel', endTouch);
     },
 
     // ── Loop ──────────────────────────────────────────────────────────────────
