@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Nachonoid - Ultimate Edition</title>
+    <style>
+        :root {
+            --primary: #00e5ff;
+            --danger: #ff0055;
+            --bg: #050510;
+            --p-1b: #00ff88;   /* Una bola - Verde */
+            --p-2b: #00ccff;   /* Dos bolas - Cyan */
+            --p-time: #ffcc00; /* Tiempo - Amarillo */
+            --p-wide: #ff00ff; /* Ancho - Magenta */
+            --p-speed: #ff6600;/* Velocidad - Naranja */
+            --p-life: #ff0055; /* Vida - Rojo */
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-tap-highlight-color: transparent; }
+
+        body {
+            background-color: #000;
+            color: #fff;
+            font-family: 'Segoe UI', sans-serif;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        #game-wrapper {
+            position: relative;
+            width: 100%;
+            flex-grow: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: var(--bg);
+        }
+
+        canvas {
+            background: #000;
+            max-width: 100%;
+            max-height: 100%;
+        }
+
+        .overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(5, 5, 15, 0.95);
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            z-index: 10; text-align: center; padding: 20px;
+        }
+
+        .hidden { display: none !important; }
+
+        h1 { font-size: clamp(2.5rem, 10vw, 4.5rem); color: var(--primary); letter-spacing: 8px; margin-bottom: 10px; text-shadow: 0 0 20px var(--primary); }
+        .info { font-size: 0.8rem; color: #aaa; margin-bottom: 30px; letter-spacing: 2px; }
+
+        button {
+            padding: 15px 50px; font-size: 1.1rem; background: transparent;
+            color: var(--primary); border: 1px solid var(--primary);
+            cursor: pointer; transition: 0.3s; text-transform: uppercase;
+        }
+
+        button:hover { background: rgba(0, 229, 255, 0.1); box-shadow: 0 0 15px var(--primary); }
+
+        #mobile-ui {
+            width: 100%; height: 100px; display: flex; background: #0a0a0a; border-top: 1px solid #222;
+        }
+
+        .touch-zone {
+            flex: 1; display: flex; justify-content: center; align-items: center;
+            font-size: 2rem; color: rgba(255,255,255,0.2);
+        }
+
+        .touch-zone:active { background: rgba(255, 255, 255, 0.05); color: var(--primary); }
+
+        @media (min-width: 1024px) { #mobile-ui { display: none; } }
+    </style>
+</head>
+<body>
+
+<div id="game-wrapper">
+    <canvas id="gameCanvas"></canvas>
+
+    <div id="menu-screen" class="overlay">
+        <h1>NACHONOID</h1>
+        <div class="info">SPACE MISSION • 120s PER SECTOR</div>
+        <button id="start-btn">INITIATE SYSTEM</button>
+    </div>
+
+    <div id="gameover-screen" class="overlay hidden">
+        <h1 style="color: var(--danger);">TERMINATED</h1>
+        <button id="restart-lose-btn">REBOOT</button>
+    </div>
+
+    <div id="win-screen" class="overlay hidden">
+        <h1 style="color: #00ff88;">GALAXY SAVED</h1>
+        <button id="restart-win-btn">PLAY AGAIN</button>
+    </div>
+</div>
+
+<div id="mobile-ui">
+    <div class="touch-zone" id="left-zone">◀</div>
+    <div class="touch-zone" id="right-zone">▶</div>
+</div>
+
+<script>
+const Game = {
+    canvas: document.getElementById('gameCanvas'),
+    ctx: null,
+    audioCtx: null,
+    baseW: 800, baseH: 600,
+    scale: 1,
+    state: 'menu',
+    score: 0, lives: 3, level: 1, timer: 120, lastTime: 0,
+    
+    paddle: { 
+        w: 100, h: 12, x: 350, y: 560, 
+        baseSpeed: 10, speed: 10, 
+        ext: 0, fast: 0 
+    },
+    balls: [],
+    bricks: [],
+    powerups: [],
+    keys: { left: false, right: false },
+
+    init() {
+        this.ctx = this.canvas.getContext('2d');
+        window.addEventListener('resize', () => this.resize());
+        this.resize();
+        this.attachListeners();
+        this.gameLoop(0);
+    },
+
+    resize() {
+        const wrapper = document.getElementById('game-wrapper');
+        const ratio = this.baseW / this.baseH;
+        let newW = wrapper.clientWidth, newH = newW / ratio;
+        if (newH > wrapper.clientHeight) { newH = wrapper.clientHeight; newW = newH * ratio; }
+        this.canvas.width = newW; this.canvas.height = newH;
+        this.scale = newW / this.baseW;
+    },
+
+    initAudio() {
+        if (!this.audioCtx) this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    },
+
+    playSound(f, type = 'sine', vol = 0.02) {
+        if (!this.audioCtx) return;
+        const now = this.audioCtx.currentTime;
+        const osc = this.audioCtx.createOscillator();
+        const g = this.audioCtx.createGain();
+        osc.type = type; osc.frequency.setValueAtTime(f, now);
+        g.gain.setValueAtTime(vol, now);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+        osc.connect(g); g.connect(this.audioCtx.destination);
+        osc.start(); osc.stop(now + 0.1);
+    },
+
+    resetLevel(full = false) {
+        if (full) { this.score = 0; this.lives = 3; this.level = 1; }
+        this.timer = 120;
+        this.balls = [];
+        this.powerups = [];
+        this.paddle.w = 100;
+        this.paddle.speed = this.paddle.baseSpeed;
+        this.paddle.ext = 0; this.paddle.fast = 0;
+        this.createBall();
+        this.createBricks();
+        this.paddle.x = (this.baseW - this.paddle.w) / 2;
+    },
+
+    createBall() {
+        this.balls.push({
+            x: this.paddle.x + this.paddle.w / 2, y: this.paddle.y - 10,
+            r: 6, dx: (Math.random()-0.5)*8, dy: -5
+        });
+    },
+
+    createBricks() {
+        this.bricks = [];
+        const rows = 4 + this.level, cols = 8;
+        const w = 85, h = 20, pad = 8;
+        const leftOff = (this.baseW - (cols * (w + pad))) / 2;
+        for(let r=0; r<rows; r++) {
+            this.bricks[r] = [];
+            for(let c=0; c<cols; c++) {
+                let type = Math.random() > 0.9 ? 'indestructible' : (Math.random() > 0.7 ? 'hard' : 'normal');
+                this.bricks[r][c] = { x: c*(w+pad)+leftOff, y: r*(h+pad)+60, w, h, type, status: type==='hard'?2:1 };
+            }
+        }
+    },
+
+    update(ts) {
+        if (this.state !== 'playing') { this.lastTime = ts; return; }
+        const dt = (ts - this.lastTime) / 1000;
+        this.lastTime = ts;
+        this.timer -= dt;
+
+        if (this.timer <= 0) { this.state = 'gameover'; this.updateUI(); }
+
+        // Paddle Movement
+        if (this.keys.left && this.paddle.x > 0) this.paddle.x -= this.paddle.speed;
+        if (this.keys.right && this.paddle.x < this.baseW - this.paddle.w) this.paddle.x += this.paddle.speed;
+        
+        // Timers for PowerUps
+        if (this.paddle.ext > 0) this.paddle.ext--; else this.paddle.w = 100;
+        if (this.paddle.fast > 0) this.paddle.fast--; else this.paddle.speed = this.paddle.baseSpeed;
+
+        // PowerUps Logic
+        for (let i = this.powerups.length-1; i >= 0; i--) {
+            let p = this.powerups[i];
+            p.y += 3.5;
+            if (p.y > this.paddle.y && p.y < this.paddle.y + this.paddle.h && p.x > this.paddle.x && p.x < this.paddle.x + this.paddle.w) {
+                this.applyPower(p.type);
+                this.powerups.splice(i, 1);
+            } else if (p.y > this.baseH) this.powerups.splice(i, 1);
+        }
+
+        // Balls Logic
+        for (let i = this.balls.length-1; i >= 0; i--) {
+            let b = this.balls[i];
+            b.x += b.dx; b.y += b.dy;
+
+            if (b.x + b.r > this.baseW || b.x - b.r < 0) { b.dx = -b.dx; this.playSound(200); }
+            if (b.y - b.r < 0) { b.dy = -b.dy; this.playSound(200); }
+
+            if (b.y + b.r > this.paddle.y && b.y < this.paddle.y + this.paddle.h && b.x > this.paddle.x && b.x < this.paddle.x + this.paddle.w) {
+                let hit = (b.x - (this.paddle.x + this.paddle.w/2)) / (this.paddle.w/2);
+                b.dx = hit * 8; b.dy = -Math.abs(b.dy);
+                this.playSound(300);
+            }
+
+            this.bricks.forEach(row => row.forEach(br => {
+                if (br.status > 0 && b.x > br.x && b.x < br.x + br.w && b.y > br.y && b.y < br.y + br.h) {
+                    b.dy = -b.dy;
+                    if (br.type !== 'indestructible') {
+                        br.status--; this.score += 100;
+                        this.playSound(400);
+                        if (br.status === 0 && Math.random() < 0.25) this.spawnPower(br.x + br.w/2, br.y);
+                    }
+                }
+            }));
+
+            if (b.y > this.baseH) this.balls.splice(i, 1);
+        }
+
+        if (this.balls.length === 0) {
+            this.lives--;
+            if (this.lives <= 0) this.state = 'gameover'; else this.createBall();
+            this.updateUI();
+        }
+        this.checkWin();
+    },
+
+    spawnPower(x, y) {
+        const types = ['1B', '2B', 'TIME', 'WIDE', 'SPEED', 'LIFE'];
+        this.powerups.push({ x, y, type: types[Math.floor(Math.random()*types.length)] });
+    },
+
+    applyPower(t) {
+        this.playSound(600, 'square', 0.05);
+        if (t === '1B') this.createBall();
+        if (t === '2B') { this.createBall(); this.createBall(); }
+        if (t === 'TIME') this.timer += 30;
+        if (t === 'WIDE') { this.paddle.w = 180; this.paddle.ext = 600; }
+        if (t === 'SPEED') { this.paddle.speed = 16; this.paddle.fast = 600; }
+        if (t === 'LIFE') this.lives++;
+    },
+
+    checkWin() {
+        let rem = 0;
+        this.bricks.forEach(r => r.forEach(b => { if(b.type !== 'indestructible' && b.status > 0) rem++; }));
+        if (rem === 0) {
+            if (this.level < 5) { this.level++; this.resetLevel(); }
+            else this.state = 'win';
+            this.updateUI();
+        }
+    },
+
+    getColor(t) {
+        switch(t) {
+            case '1B': return '#00ff88';
+            case '2B': return '#00ccff';
+            case 'TIME': return '#ffcc00';
+            case 'WIDE': return '#ff00ff';
+            case 'SPEED': return '#ff6600';
+            case 'LIFE': return '#ff0055';
+            default: return '#fff';
+        }
+    },
+
+    render() {
+        const s = this.scale;
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        
+        // Bricks
+        this.bricks.forEach(row => row.forEach(b => {
+            if (b.status > 0) {
+                this.ctx.fillStyle = b.type === 'indestructible' ? '#222' : (b.type === 'hard' ? (b.status === 2 ? '#7000ff' : '#a366ff') : '#00e5ff');
+                this.ctx.fillRect(b.x*s, b.y*s, b.w*s, b.h*s);
+                this.ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+                this.ctx.strokeRect(b.x*s, b.y*s, b.w*s, b.h*s);
+            }
+        }));
+
+        // PowerUps
+        this.powerups.forEach(p => {
+            this.ctx.fillStyle = this.getColor(p.type);
+            this.ctx.fillRect((p.x-12)*s, p.y*s, 24*s, 14*s);
+        });
+
+        // Paddle & Balls
+        this.ctx.fillStyle = (this.paddle.ext > 0 || this.paddle.fast > 0) ? '#00ff88' : '#fff';
+        this.ctx.fillRect(this.paddle.x*s, this.paddle.y*s, this.paddle.w*s, this.paddle.h*s);
+        this.ctx.fillStyle = '#fff';
+        this.balls.forEach(b => {
+            this.ctx.beginPath(); this.ctx.arc(b.x*s, b.y*s, b.r*s, 0, Math.PI*2); this.ctx.fill();
+        });
+
+        // HUD
+        this.ctx.fillStyle = '#fff';
+        this.ctx.font = `${14*s}px 'Segoe UI'`;
+        this.ctx.fillText(`SECTOR: ${this.level}  LIVES: ${this.lives}  SCORE: ${this.score}`, 20*s, 30*s);
+        
+        this.ctx.font = `bold ${20*s}px Courier New`;
+        this.ctx.fillStyle = this.timer < 20 ? varColor('--danger') : '#fff';
+        this.ctx.fillText(`${Math.ceil(this.timer)}s`, this.canvas.width - 60*s, 30*s);
+    },
+
+    updateUI() {
+        document.getElementById('menu-screen').classList.toggle('hidden', this.state !== 'menu');
+        document.getElementById('gameover-screen').classList.toggle('hidden', this.state !== 'gameover');
+        document.getElementById('win-screen').classList.toggle('hidden', this.state !== 'win');
+    },
+
+    attachListeners() {
+        const start = () => { this.initAudio(); this.resetLevel(true); this.state = 'playing'; this.updateUI(); };
+        document.getElementById('start-btn').onclick = start;
+        document.getElementById('restart-lose-btn').onclick = start;
+        document.getElementById('restart-win-btn').onclick = start;
+
+        window.onkeydown = (e) => {
+            if (e.key === 'ArrowLeft') this.keys.left = true;
+            if (e.key === 'ArrowRight') this.keys.right = true;
+        };
+        window.onkeyup = (e) => {
+            if (e.key === 'ArrowLeft') this.keys.left = false;
+            if (e.key === 'ArrowRight') this.keys.right = false;
+        };
+
+        const lz = document.getElementById('left-zone'), rz = document.getElementById('right-zone');
+        lz.ontouchstart = (e) => { e.preventDefault(); this.keys.left = true; this.initAudio(); };
+        lz.ontouchend = () => this.keys.left = false;
+        rz.ontouchstart = (e) => { e.preventDefault(); this.keys.right = true; this.initAudio(); };
+        rz.ontouchend = () => this.keys.right = false;
+    },
+
+    gameLoop(ts) {
+        this.update(ts);
+        this.render();
+        requestAnimationFrame((t) => this.gameLoop(t));
+    }
+};
+
+function varColor(n) { return getComputedStyle(document.documentElement).getPropertyValue(n); }
+window.onload = () => Game.init();
+</script>
+</body>
+</html>
